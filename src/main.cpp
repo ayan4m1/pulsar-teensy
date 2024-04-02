@@ -18,6 +18,9 @@ typedef struct {
 #define MAX_COMMAND_LENGTH 16
 #define MAX_COMMANDS 16
 #define DEVICE_BAUD 115200
+#define MAX_PUFF_SECONDS 20
+#define MAX_PAUSE_SECONDS 120
+#define USB_PRODUCT_MATCH_STRING "DNA"
 
 // do not modify
 #define HOST_BAUD 9600
