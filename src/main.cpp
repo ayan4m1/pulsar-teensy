@@ -10,6 +10,7 @@ typedef struct {
 } command_t;
 
 #define SWITCH_PIN 1
+#define SWITCH_HOLD_TIME_MS 2000
 
 // customize as necessary
 #define FILE_PATH "/test.csv"
