@@ -13,6 +13,7 @@ typedef struct {
 #define SWITCH_HOLD_TIME_MS 2000
 
 // customize as necessary
+// todo: file browser UI of some sort
 #define FILE_PATH "/test.csv"
 #define CSV_SEPARATOR ','
 #define MAX_COMMAND_LENGTH 16
@@ -49,39 +50,36 @@ uint8_t commandCount = 0;
 Button2 btn = Button2();
 
 void handleButtonPress(Button2 &btn) {
-  LOG.println(F("[BUTTON] Pressed!"));
+  LOG.println(F("[TRIGGER] Pressed!"));
   if (!driverActive || !serialActive) {
-    LOG.println(F("[DEV] Serial connection is not active!"));
+    LOG.println(F("[DEV] Serial connection inactive, abort!"));
     return;
   }
-  LOG.println(F("[HOST] Sending commands..."));
+  LOG.printf(F("[HOST] Sending %d commands...\n"), commandCount);
 
   for (uint8_t i = 0; i < commandCount; i++) {
     const command_t cmd = commands[i];
     char cmdStr[MAX_COMMAND_LENGTH];
 
-    uint16_t wattage = 0, duration = 0;
+    uint16_t value = (uint16_t)cmd.val;
 
     switch (cmd.cmd) {
       case 'W': {
-        wattage = (uint16_t)cmd.val;
-        LOG.printf(F("[ACT] Setting wattage to %dW\n"), wattage);
-        sprintf(cmdStr, "P=%dW", wattage);
+        LOG.printf(F("[ACT] Setting wattage to %dW\n"), value);
+        sprintf(cmdStr, "P=%dW", value);
         usbSerial.println(cmdStr);
         break;
       }
       case 'F': {
-        duration = (uint16_t)cmd.val;
-        LOG.printf(F("[ACT] Firing for %ds\n"), duration);
-        sprintf(cmdStr, "F=%dS", duration);
+        LOG.printf(F("[ACT] Firing for %ds\n"), value);
+        sprintf(cmdStr, "F=%dS", value);
         usbSerial.println(cmdStr);
-        delay(duration * 1e3);
+        delay(value * 1e3);
         break;
       }
       case 'P': {
-        duration = (uint16_t)cmd.val;
-        LOG.printf(F("[ACT] Pausing for %ds\n"), duration);
-        delay(duration * 1e3);
+        LOG.printf(F("[ACT] Pausing for %ds\n"), value);
+        delay(value * 1e3);
         break;
       }
     }
@@ -92,49 +90,53 @@ void handleButtonPress(Button2 &btn) {
 
 void handleDeviceDisconnect() {
   if (serialActive) {
-    LOG.println(F("[HOST] Closing serial connection to device..."));
+    LOG.println(F("[HOST] Closing serial connection..."));
+    usbSerial.end();
     serialActive = false;
   }
 
   if (driverActive) {
-    LOG.printf(F("[DEV] %s Disconnected\n"), driverName);
-    driverActive = false;
+    LOG.println(F("[TRIGGER] Stopping monitor..."));
     btn.reset();
+    driverActive = false;
     digitalWrite(LED_BUILTIN, LOW);
   }
 }
 
 void handleDeviceConnect() {
-  LOG.println(F("[HOST] Opening serial connection to device..."));
+  LOG.println(F("[HOST] Opening serial connection..."));
   usbSerial.begin(HOST_BAUD, USBHOST_SERIAL_8N1);
   while (!usbSerial) {
     delay(100);
   }
   serialActive = true;
-  LOG.println(F("[HOST] Opened serial connection!"));
+  LOG.println(F("[HOST] Serial connection open!"));
+  digitalWrite(LED_BUILTIN, HIGH);
 
-  const uint8_t *mfg = usbSerial.manufacturer();
-  const uint8_t *prod = usbSerial.product();
-  const uint8_t *serNum = usbSerial.serialNumber();
+  const char *mfg = (const char *)usbSerial.manufacturer();
+  const char *prod = (const char *)usbSerial.product();
+  const char *serNum = (const char *)usbSerial.serialNumber();
 
-  if (!mfg || !*mfg) {
-    mfg = 0;
-  }
-  if (!prod || !*prod) {
-    prod = 0;
-  }
   if (!serNum || !*serNum) {
-    serNum = 0;
+    serNum = '\0';
   }
 
-  LOG.printf(F("[DEV] Connected %s (%x:%x)\n"), driverName,
-             usbSerial.idVendor(), usbSerial.idProduct());
+  LOG.printf(F("[DEV] USB IDs %x:%x\n"), usbSerial.idVendor(),
+             usbSerial.idProduct());
   LOG.printf(F("[DEV] Device %s, %s (%s)\n"), mfg, prod, serNum);
 
+  if (strstr(prod, USB_PRODUCT_MATCH_STRING) == NULL) {
+    LOG.println(F("[DEV] Not a DNA!"));
+    usbSerial.end();
+    serialActive = false;
+    LOG.println(F("[HOST] Serial connection closed!"));
+    return;
+  }
+
   btn.begin(SWITCH_PIN);
-  btn.setTapHandler(&handleButtonPress);
-  digitalWrite(LED_BUILTIN, HIGH);
-  LOG.println(F("[BUTTON] Waiting for press..."));
+  btn.setLongClickTime(SWITCH_HOLD_TIME_MS);
+  btn.setLongClickHandler(&handleButtonPress);
+  LOG.println(F("[TRIGGER] Starting monitor..."));
   driverActive = true;
 }
 
@@ -151,7 +153,7 @@ bool loadCSV() {
 
   File file = SD.open(FILE_PATH);
   uint8_t index = 0;
-  while (true) {
+  while (index < MAX_COMMANDS) {
     String cmdStr = file.readStringUntil(',').trim();
 
     if (cmdStr.length() == 0) {
@@ -163,9 +165,21 @@ bool loadCSV() {
 
     if (cmd != 'W' && cmd != 'F' && cmd != 'P') {
       LOG.printf(F("[CSV] Invalid command %c in CSV!\n"), cmd);
+      file.close();
       return false;
-    } else if (isnan(val) || val < 0 || val > 1e3) {
-      LOG.printf(F("[CSV] Invalid number %.2f in CSV!\n"), val);
+    } else if (cmd == 'W' && (val < 5 || val > 400)) {
+      LOG.printf(F("[CSV] %.2f watts is outside the range 5-400W!\n"), val);
+      file.close();
+      return false;
+    } else if (cmd == 'F' && (val < 1 || val > MAX_PUFF_SECONDS)) {
+      LOG.printf(F("[CSV] Fire duration of %.2f is outside the range 1-%ds"),
+                 val, MAX_PUFF_SECONDS);
+      file.close();
+      return false;
+    } else if (cmd == 'P' && (val < 1 || val > MAX_PAUSE_SECONDS)) {
+      LOG.printf(F("[CSV] Pause duration of %.2f is outside the range 1-%ds"),
+                 val, MAX_PAUSE_SECONDS);
+      file.close();
       return false;
     }
 
@@ -173,11 +187,14 @@ bool loadCSV() {
     LOG.printf(F("[CSV] Parsed line %d\nCommand: %c\nValue: %.2f\n"), index,
                cmd, val);
   }
+  file.close();
 
   commandCount = index + 1;
+  if (commandCount == 0) {
+    LOG.println(F("[CSV] No commands loaded!"));
+    return false;
+  }
   LOG.printf(F("[CSV] Loaded %d commands\n"), commandCount);
-
-  file.close();
   return true;
 }
 
@@ -196,6 +213,7 @@ void setup() {
   LOG.println(F("[HOST] Connected to debugger!"));
 
   if (!loadCSV()) {
+    LOG.println(F("[CSV] Invalid CSV supplied, cannot continue!"));
     return;
   }
 
